@@ -66,6 +66,27 @@ type Tenant = {
   vgpu: number;
 };
 
+type TenantQuotaStatus = "已生效" | "待审批" | "预警";
+
+type TenantQuotaProfile = {
+  id: string;
+  tenantId: string;
+  tenantName: string;
+  industry: string;
+  owner: string;
+  workspaceCount: number;
+  cpu: number;
+  memory: number;
+  gpu: number;
+  storage: number;
+  usedCpu: number;
+  usedMemory: number;
+  usedGpu: number;
+  usedStorage: number;
+  status: TenantQuotaStatus;
+  updatedAt: string;
+};
+
 type ResourceSpec = {
   id: string;
   name: string;
@@ -398,6 +419,33 @@ type ClusterNodePool = {
   networkPolicy: NodePoolFabricPolicy;
 };
 
+type ClusterHostStatus = "运行中" | "维护中" | "已隔离";
+
+type ClusterHostPower = "在线" | "待重启" | "已关机";
+
+type ClusterHost = {
+  id: string;
+  name: string;
+  status: ClusterHostStatus;
+  power: ClusterHostPower;
+  gpuType: string;
+  gpuCount: number;
+  ip: string;
+  rack: string;
+  zone: string;
+  lastHeartbeat: string;
+};
+
+type ClusterHostGroup = {
+  id: string;
+  name: string;
+  role: ClusterNodePool["role"];
+  accelerator: string;
+  rdmaNic: string;
+  networkPolicy: NodePoolFabricPolicy;
+  hosts: ClusterHost[];
+};
+
 type ClusterNetworkConfig = {
   topology: "单数据中心" | "双活机房" | "跨云互联";
   primaryFabric: FabricType;
@@ -627,6 +675,63 @@ const tenants: Tenant[] = [
   { id: "workspace-a", name: "大模型研发空间", level: "工作空间", cpu: 128, gpu: 12, vgpu: 48 },
 ];
 
+const initialTenantQuotaProfiles: TenantQuotaProfile[] = [
+  {
+    id: "quota-tenant-a",
+    tenantId: "tenant-a",
+    tenantName: "智能制造租户",
+    industry: "离散制造 / 质检分析",
+    owner: "刘晨",
+    workspaceCount: 6,
+    cpu: 480,
+    memory: 2048,
+    gpu: 56,
+    storage: 320,
+    usedCpu: 392,
+    usedMemory: 1680,
+    usedGpu: 44,
+    usedStorage: 236,
+    status: "已生效",
+    updatedAt: "2026-04-25 09:40",
+  },
+  {
+    id: "quota-tenant-b",
+    tenantId: "tenant-b",
+    tenantName: "城市治理租户",
+    industry: "政务问答 / 城市治理",
+    owner: "周岚",
+    workspaceCount: 4,
+    cpu: 400,
+    memory: 1536,
+    gpu: 40,
+    storage: 260,
+    usedCpu: 338,
+    usedMemory: 1412,
+    usedGpu: 35,
+    usedStorage: 248,
+    status: "预警",
+    updatedAt: "2026-04-25 10:05",
+  },
+  {
+    id: "quota-tenant-c",
+    tenantId: "tenant-c",
+    tenantName: "金融风控租户",
+    industry: "金融建模 / 审计分析",
+    owner: "沈越",
+    workspaceCount: 5,
+    cpu: 320,
+    memory: 1280,
+    gpu: 28,
+    storage: 180,
+    usedCpu: 214,
+    usedMemory: 860,
+    usedGpu: 16,
+    usedStorage: 124,
+    status: "待审批",
+    updatedAt: "2026-04-24 17:26",
+  },
+];
+
 const modelAssets: ModelAsset[] = [
   {
     id: "m-001",
@@ -719,6 +824,13 @@ const scenarios: DemoScenario[] = [
     summary: "从集团资源池到租户、工作空间逐级约束，保证异构算力可控分配。",
     steps: ["定义规格", "绑定租户", "设置上限", "下发策略", "审计留痕"],
     tone: "blue",
+  },
+  {
+    key: "tenant-quota",
+    title: "租户级配额分配",
+    summary: "面向平台运营员统一管理租户级资源额度，并支持将可用额度授权到各工作空间。",
+    steps: ["查看租户", "打开配额分配", "设置 CPU/内存/GPU/硬盘", "保存生效", "审计留痕"],
+    tone: "violet",
   },
   {
     key: "encryption",
@@ -1983,6 +2095,7 @@ const navigationSections: NavigationSection[] = [
       { path: "/", label: "平台总览", icon: Gauge },
       { path: "/cluster", label: "集群管理", icon: Network, scenario: "cluster" },
       { path: "/compute", label: "算力规格", icon: Cpu, scenario: "compute" },
+      { path: "/tenant-quota", label: "租户配额", icon: Users, scenario: "tenant-quota" },
       { path: "/scheduler", label: "调度器", icon: Workflow, scenario: "scheduler" },
       { path: "/tasks", label: "任务管理", icon: Archive, scenario: "tasks" },
     ],
@@ -2204,6 +2317,12 @@ function clusterStatusTone(status: ClusterStatus): Tone {
   return "amber";
 }
 
+function clusterHostStatusTone(status: ClusterHostStatus): Tone {
+  if (status === "运行中") return "emerald";
+  if (status === "维护中") return "amber";
+  return "rose";
+}
+
 function pluginStatusTone(status: ClusterPlugin["status"]): Tone {
   if (status === "运行中") return "emerald";
   if (status === "安装中") return "blue";
@@ -2273,6 +2392,104 @@ function cloneClusters(items: Cluster[]) {
     },
     nodePools: item.nodePools.map((pool) => ({ ...pool })),
   }));
+}
+
+function normalizeGpuType(accelerator: string) {
+  if (accelerator === "CPU") {
+    return "无 GPU";
+  }
+
+  return accelerator.split("/")[0].trim();
+}
+
+function defaultGpuCount(role: ClusterNodePool["role"], gpuType: string) {
+  if (gpuType === "无 GPU") {
+    return 0;
+  }
+
+  if (role === "训练") {
+    return 8;
+  }
+
+  if (role === "推理") {
+    return 4;
+  }
+
+  return 2;
+}
+
+function defaultHostStatus(index: number): ClusterHostStatus {
+  if ((index + 1) % 29 === 0) {
+    return "已隔离";
+  }
+
+  if ((index + 1) % 17 === 0) {
+    return "维护中";
+  }
+
+  return "运行中";
+}
+
+function powerStateForStatus(status: ClusterHostStatus): ClusterHostPower {
+  if (status === "已隔离") {
+    return "已关机";
+  }
+
+  return "在线";
+}
+
+function buildClusterHost(cluster: Cluster, pool: ClusterNodePool, index: number): ClusterHost {
+  const gpuType = normalizeGpuType(pool.accelerator);
+  const gpuCount = defaultGpuCount(pool.role, gpuType);
+  const status = defaultHostStatus(index);
+  const zoneSuffix = pool.role === "训练" ? "A" : pool.role === "推理" ? "B" : "C";
+
+  return {
+    id: `${pool.id}-host-${index + 1}`,
+    name: `${pool.name}-${String(index + 1).padStart(2, "0")}`,
+    status,
+    power: powerStateForStatus(status),
+    gpuType,
+    gpuCount,
+    ip: `10.${12 + cluster.nodePools.findIndex((item) => item.id === pool.id)}.${Math.floor(index / 24) + 10}.${(index % 24) + 11}`,
+    rack: `R${String(Math.floor(index / 8) + 1).padStart(2, "0")}`,
+    zone: `${cluster.region} / ${zoneSuffix} 区`,
+    lastHeartbeat: `2026-04-25 10:${String((index * 3) % 60).padStart(2, "0")}`,
+  };
+}
+
+function buildClusterHostGroups(cluster: Cluster): ClusterHostGroup[] {
+  return cluster.nodePools.map((pool) => ({
+    id: pool.id,
+    name: pool.name,
+    role: pool.role,
+    accelerator: pool.accelerator,
+    rdmaNic: pool.rdmaNic,
+    networkPolicy: pool.networkPolicy,
+    hosts: Array.from({ length: pool.nodes }, (_, index) => buildClusterHost(cluster, pool, index)),
+  }));
+}
+
+function buildClusterHostGroupState(clusters: Cluster[]) {
+  return Object.fromEntries(clusters.map((cluster) => [cluster.id, buildClusterHostGroups(cluster)])) as Record<string, ClusterHostGroup[]>;
+}
+
+function createHostForGroup(cluster: Cluster, group: ClusterHostGroup, serial: number): ClusterHost {
+  const gpuType = normalizeGpuType(group.accelerator);
+  const gpuCount = defaultGpuCount(group.role, gpuType);
+
+  return {
+    id: `${group.id}-host-${serial}`,
+    name: `${group.name}-${String(serial).padStart(2, "0")}`,
+    status: "运行中",
+    power: "在线",
+    gpuType,
+    gpuCount,
+    ip: `10.${20 + cluster.nodePools.findIndex((item) => item.id === group.id)}.${Math.floor(serial / 24) + 20}.${(serial % 24) + 20}`,
+    rack: `R${String(Math.floor((serial - 1) / 8) + 1).padStart(2, "0")}`,
+    zone: `${cluster.region} / 扩容池`,
+    lastHeartbeat: `2026-04-25 ${nowTime()}`,
+  };
 }
 
 function buildClusterPluginRuntimeState(clusters: Cluster[], plugins: ClusterPlugin[]) {
@@ -2899,8 +3116,9 @@ function App() {
           <div className="content-wrap">
             <Routes>
               <Route path="/" element={<Dashboard audit={audit} />} />
-              <Route path="/cluster" element={<ClusterPage addAudit={addAudit} />} />
+              <Route path="/cluster/*" element={<ClusterPage addAudit={addAudit} />} />
               <Route path="/compute" element={<ComputePage tenant={selectedTenant} addAudit={addAudit} />} />
+              <Route path="/tenant-quota" element={<TenantQuotaPage addAudit={addAudit} />} />
               <Route path="/encryption" element={<EncryptionPage addAudit={addAudit} />} />
               <Route path="/safety" element={<SafetyPage addAudit={addAudit} />} />
               <Route path="/dev" element={<DevInstancePage addAudit={addAudit} />} />
@@ -3103,7 +3321,12 @@ function Dashboard({ audit }: { audit: AuditEvent[] }) {
 }
 
 function ClusterPage({ addAudit }: { addAudit: (event: Omit<AuditEvent, "id" | "time">) => void }) {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [clusters, setClusters] = useState<Cluster[]>(() => cloneClusters(initialClusters));
+  const [clusterHostGroups, setClusterHostGroups] = useState<Record<string, ClusterHostGroup[]>>(() =>
+    buildClusterHostGroupState(initialClusters),
+  );
   const [selectedClusterId, setSelectedClusterId] = useState(initialClusters[0].id);
   const [pluginTab, setPluginTab] = useState<ClusterPluginTab>("platform");
   const [pluginRuntime, setPluginRuntime] = useState<Record<string, Record<string, ClusterPluginRuntime>>>(() =>
@@ -3132,6 +3355,18 @@ function ClusterPage({ addAudit }: { addAudit: (event: Omit<AuditEvent, "id" | "
   );
   const platformPluginCount = clusterPlugins.filter((item) => item.category === "platform").length;
   const kubernetesPluginCount = clusterPlugins.filter((item) => item.category === "kubernetes").length;
+
+  useEffect(() => {
+    const match = location.pathname.match(/^\/cluster\/([^/]+)$/);
+    if (!match) {
+      return;
+    }
+
+    const clusterId = decodeURIComponent(match[1]);
+    if (clusters.some((item) => item.id === clusterId)) {
+      setSelectedClusterId(clusterId);
+    }
+  }, [clusters, location.pathname]);
 
   const updatePluginRuntime = (clusterId: string, pluginId: string, patch: Partial<ClusterPluginRuntime>) => {
     setPluginRuntime((current) => ({
@@ -3209,6 +3444,24 @@ function ClusterPage({ addAudit }: { addAudit: (event: Omit<AuditEvent, "id" | "
 
     setEditingClusterId(clusterId);
     setDraftCluster(cloneClusters([target])[0]);
+  };
+
+  const adjustClusterNodeCount = (clusterId: string, poolId: string, delta: number) => {
+    setClusters((items) =>
+      items.map((item) => {
+        if (item.id !== clusterId) {
+          return item;
+        }
+
+        return {
+          ...item,
+          nodes: Math.max(0, item.nodes + delta),
+          nodePools: item.nodePools.map((pool) =>
+            pool.id === poolId ? { ...pool, nodes: Math.max(0, pool.nodes + delta) } : pool,
+          ),
+        };
+      }),
+    );
   };
 
   const closeConfig = () => {
@@ -3362,165 +3615,45 @@ function ClusterPage({ addAudit }: { addAudit: (event: Omit<AuditEvent, "id" | "
   };
 
   return (
-    <ModuleScaffold scenarioKey="cluster">
-      <section className="surface-panel">
-        <SectionHeader
-          eyebrow="CLUSTER OVERVIEW"
-          title="集群清单与 RDMA 网络编排"
-          description="为训练、推理和跨云复制流量设计集群级网络平面，统一管理 IB 与 RoCE 配置并把策略下发到调度器。"
+    <>
+      <Routes>
+        <Route
+          index
+          element={
+            <ClusterOverviewRoute
+              clusters={clusters}
+              runningCount={runningCount}
+              crossCloudCount={crossCloudCount}
+              totalRdmaJobs={totalRdmaJobs}
+              selectedCluster={selectedCluster}
+              filteredPlugins={filteredPlugins}
+              pluginTab={pluginTab}
+              setPluginTab={setPluginTab}
+              platformPluginCount={platformPluginCount}
+              kubernetesPluginCount={kubernetesPluginCount}
+              onOpenConfig={openConfig}
+              onSelectCluster={(clusterId) => {
+                setSelectedClusterId(clusterId);
+                navigate(`/cluster/${clusterId}`);
+              }}
+              onRunPluginAction={runPluginAction}
+            />
+          }
         />
-        <div className="metric-grid">
-          <MetricCard icon={Network} label="纳管集群" value={`${clusters.length}`} unit="个" tone="cyan" />
-          <MetricCard icon={CheckCircle2} label="运行中集群" value={`${runningCount}`} unit="个" tone="emerald" />
-          <MetricCard icon={Globe} label="跨云互联集群" value={`${crossCloudCount}`} unit="个" tone="blue" />
-          <MetricCard icon={Workflow} label="RDMA 作业队列" value={`${totalRdmaJobs}`} unit="个" tone="amber" />
-        </div>
-      </section>
-
-      <section className="surface-panel">
-        <SectionHeader
-          eyebrow="CLUSTER LIST"
-          title="集群列表"
-          description="Mock 三类典型集群：同城训练、跨云推理与专有域隔离。点击集群卡片查看生态插件页签，点击“集群配置”进入网络编排。"
+        <Route
+          path=":clusterId"
+          element={
+            <ClusterResourcePoolDetailRoute
+              clusters={clusters}
+              clusterHostGroups={clusterHostGroups}
+              setClusterHostGroups={setClusterHostGroups}
+              onOpenConfig={openConfig}
+              onAdjustClusterNodeCount={adjustClusterNodeCount}
+              addAudit={addAudit}
+            />
+          }
         />
-        <div className="cluster-list">
-          {clusters.map((cluster) => (
-            <article
-              key={cluster.id}
-              className={`cluster-card ${selectedCluster.id === cluster.id ? "selected" : ""}`}
-              onClick={() => setSelectedClusterId(cluster.id)}
-            >
-              <div className="cluster-card-head">
-                <div>
-                  <span className="eyebrow">{cluster.region}</span>
-                  <h3>{cluster.name}</h3>
-                </div>
-                <StatusBadge tone={clusterStatusTone(cluster.status)}>{cluster.status}</StatusBadge>
-              </div>
-              <p>{cluster.business}</p>
-              <div className="cluster-card-tags">
-                <span>{cluster.fabricPreference}</span>
-                <span>{cluster.network.primaryFabric} 主平面</span>
-                <span>{cluster.nodes} 节点</span>
-              </div>
-              <div className="cluster-card-meta">
-                <span>{cluster.accelerator}</span>
-                <span>{cluster.latencyTarget}</span>
-                <span>{cluster.configVersion}</span>
-              </div>
-              <div className="cluster-card-footer">
-                <strong>RDMA 作业 {cluster.rdmaJobs}</strong>
-                <button
-                  className="inline-action"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openConfig(cluster.id);
-                  }}
-                >
-                  集群配置
-                </button>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="surface-panel safety-tab-shell">
-        <div className="cluster-plugin-shell">
-          <div className="cluster-plugin-header">
-            <div>
-              <span className="eyebrow">PLUGIN ECOSYSTEM</span>
-              <h2>{selectedCluster.name} 插件生态</h2>
-              <p>
-                当前展示 {selectedCluster.name} 的插件视图，覆盖智算平台自有生态与 Kubernetes 生态组件，
-                用于表达平台支持插件化管理自身和第三方组件的能力。
-              </p>
-            </div>
-            <div className="cluster-plugin-meta">
-              <MetricMini label="当前集群" value={selectedCluster.region} />
-              <MetricMini label="平台插件" value={`${platformPluginCount}`} />
-              <MetricMini label="K8s 插件" value={`${kubernetesPluginCount}`} />
-            </div>
-          </div>
-
-          <div className="safety-tabs" role="tablist" aria-label="集群插件生态分类">
-            <button
-              className={pluginTab === "platform" ? "active" : ""}
-              type="button"
-              role="tab"
-              aria-selected={pluginTab === "platform"}
-              onClick={() => setPluginTab("platform")}
-            >
-              <Boxes size={16} />
-              智算平台生态插件
-            </button>
-            <button
-              className={pluginTab === "kubernetes" ? "active" : ""}
-              type="button"
-              role="tab"
-              aria-selected={pluginTab === "kubernetes"}
-              onClick={() => setPluginTab("kubernetes")}
-            >
-              <Cloud size={16} />
-              Kubernetes 生态插件
-            </button>
-          </div>
-
-          <div className="plugin-grid" role="tabpanel" aria-label={pluginTab === "platform" ? "智算平台生态插件" : "Kubernetes 生态插件"}>
-            {filteredPlugins.map((plugin) => (
-              <article key={plugin.id} className="plugin-card">
-                <div className="plugin-card-head">
-                  <div>
-                    <span className="eyebrow">{plugin.vendor}</span>
-                    <h3>{plugin.name}</h3>
-                  </div>
-                  <StatusBadge
-                    tone={pluginStatusTone(plugin.runtime.status)}
-                    animated={plugin.runtime.status === "安装中" || plugin.runtime.status === "卸载中"}
-                  >
-                    {plugin.runtime.status}
-                  </StatusBadge>
-                </div>
-                <p>{plugin.summary}</p>
-                <div className="plugin-card-strip">
-                  <span>{plugin.capability}</span>
-                  <span>{plugin.version}</span>
-                  <span>{plugin.deployment}</span>
-                </div>
-                <div className="ft-tag-strip plugin-tag-strip">
-                  {plugin.tags.map((tag) => (
-                    <span key={tag}>{tag}</span>
-                  ))}
-                </div>
-                <div className="plugin-process-line">
-                  <span>过程</span>
-                  <strong>{plugin.runtime.phase}</strong>
-                </div>
-                <div className="plugin-progress-track">
-                  <span style={{ width: `${plugin.runtime.progress}%` }} />
-                </div>
-                <div className="plugin-action-row">
-                  <span>{plugin.runtime.progress}%</span>
-                  <Button
-                    variant="secondary"
-                    icon={plugin.runtime.status === "可选安装" ? Plus : Minus}
-                    onClick={() => runPluginAction(plugin)}
-                    disabled={plugin.runtime.status === "安装中" || plugin.runtime.status === "卸载中"}
-                  >
-                    {plugin.runtime.status === "可选安装"
-                      ? "安装"
-                      : plugin.runtime.status === "安装中"
-                        ? "安装中"
-                        : plugin.runtime.status === "卸载中"
-                          ? "卸载中"
-                          : "卸载"}
-                  </Button>
-                </div>
-              </article>
-            ))}
-          </div>
-        </div>
-      </section>
+      </Routes>
 
       {editingClusterId && draftCluster ? (
         <div className="modal-backdrop" role="presentation" onClick={closeConfig}>
@@ -3806,6 +3939,723 @@ function ClusterPage({ addAudit }: { addAudit: (event: Omit<AuditEvent, "id" | "
               <Button variant="secondary" icon={Workflow} onClick={applyClusterConfig} disabled={validation.errors.length > 0}>
                 生效配置
               </Button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function ClusterOverviewRoute({
+  clusters,
+  runningCount,
+  crossCloudCount,
+  totalRdmaJobs,
+  selectedCluster,
+  filteredPlugins,
+  pluginTab,
+  setPluginTab,
+  platformPluginCount,
+  kubernetesPluginCount,
+  onOpenConfig,
+  onSelectCluster,
+  onRunPluginAction,
+}: {
+  clusters: Cluster[];
+  runningCount: number;
+  crossCloudCount: number;
+  totalRdmaJobs: number;
+  selectedCluster: Cluster;
+  filteredPlugins: Array<ClusterPlugin & { runtime: ClusterPluginRuntime }>;
+  pluginTab: ClusterPluginTab;
+  setPluginTab: React.Dispatch<React.SetStateAction<ClusterPluginTab>>;
+  platformPluginCount: number;
+  kubernetesPluginCount: number;
+  onOpenConfig: (clusterId: string) => void;
+  onSelectCluster: (clusterId: string) => void;
+  onRunPluginAction: (plugin: ClusterPlugin) => void;
+}) {
+  return (
+    <ModuleScaffold scenarioKey="cluster">
+      <section className="surface-panel">
+        <SectionHeader
+          eyebrow="CLUSTER OVERVIEW"
+          title="集群清单与 RDMA 网络编排"
+          description="为训练、推理和跨云复制流量设计集群级网络平面，统一管理 IB 与 RoCE 配置，并支持进入资源池详情进行图形化主机管理。"
+        />
+        <div className="metric-grid">
+          <MetricCard icon={Network} label="纳管集群" value={`${clusters.length}`} unit="个" tone="cyan" />
+          <MetricCard icon={CheckCircle2} label="运行中集群" value={`${runningCount}`} unit="个" tone="emerald" />
+          <MetricCard icon={Globe} label="跨云互联集群" value={`${crossCloudCount}`} unit="个" tone="blue" />
+          <MetricCard icon={Workflow} label="RDMA 作业队列" value={`${totalRdmaJobs}`} unit="个" tone="amber" />
+        </div>
+      </section>
+
+      <section className="surface-panel">
+        <SectionHeader
+          eyebrow="CLUSTER LIST"
+          title="集群列表"
+          description="点击集群卡片进入详情页，查看资源池图形管理。训练集群 A 详情页内已 mock 96 个节点，按 3 组展示，并支持组内主机新增、移除和控制。"
+        />
+        <div className="cluster-list">
+          {clusters.map((cluster) => (
+            <article
+              key={cluster.id}
+              className="cluster-card"
+              role="button"
+              tabIndex={0}
+              onClick={() => onSelectCluster(cluster.id)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onSelectCluster(cluster.id);
+                }
+              }}
+            >
+              <div className="cluster-card-head">
+                <div>
+                  <span className="eyebrow">{cluster.region}</span>
+                  <h3>{cluster.name}</h3>
+                </div>
+                <StatusBadge tone={clusterStatusTone(cluster.status)}>{cluster.status}</StatusBadge>
+              </div>
+              <p>{cluster.business}</p>
+              <div className="cluster-card-tags">
+                <span>{cluster.fabricPreference}</span>
+                <span>{cluster.network.primaryFabric} 主平面</span>
+                <span>{cluster.nodes} 节点</span>
+              </div>
+              <div className="cluster-card-meta">
+                <span>{cluster.accelerator}</span>
+                <span>{cluster.latencyTarget}</span>
+                <span>{cluster.configVersion}</span>
+              </div>
+              <div className="cluster-card-footer">
+                <strong>RDMA 作业 {cluster.rdmaJobs}</strong>
+                <div className="cluster-card-actions">
+                  <span className="inline-action">查看资源池</span>
+                  <button
+                    className="inline-action"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenConfig(cluster.id);
+                    }}
+                  >
+                    集群配置
+                  </button>
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="surface-panel safety-tab-shell">
+        <div className="cluster-plugin-shell">
+          <div className="cluster-plugin-header">
+            <div>
+              <span className="eyebrow">PLUGIN ECOSYSTEM</span>
+              <h2>{selectedCluster.name} 插件生态</h2>
+              <p>
+                当前展示 {selectedCluster.name} 的插件视图，覆盖智算平台自有生态与 Kubernetes 生态组件，
+                用于表达平台支持插件化管理自身和第三方组件的能力。
+              </p>
+            </div>
+            <div className="cluster-plugin-meta">
+              <MetricMini label="当前集群" value={selectedCluster.region} />
+              <MetricMini label="平台插件" value={`${platformPluginCount}`} />
+              <MetricMini label="K8s 插件" value={`${kubernetesPluginCount}`} />
+            </div>
+          </div>
+
+          <div className="safety-tabs" role="tablist" aria-label="集群插件生态分类">
+            <button
+              className={pluginTab === "platform" ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={pluginTab === "platform"}
+              onClick={() => setPluginTab("platform")}
+            >
+              <Boxes size={16} />
+              智算平台生态插件
+            </button>
+            <button
+              className={pluginTab === "kubernetes" ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={pluginTab === "kubernetes"}
+              onClick={() => setPluginTab("kubernetes")}
+            >
+              <Cloud size={16} />
+              Kubernetes 生态插件
+            </button>
+          </div>
+
+          <div className="plugin-grid" role="tabpanel" aria-label={pluginTab === "platform" ? "智算平台生态插件" : "Kubernetes 生态插件"}>
+            {filteredPlugins.map((plugin) => (
+              <article key={plugin.id} className="plugin-card">
+                <div className="plugin-card-head">
+                  <div>
+                    <span className="eyebrow">{plugin.vendor}</span>
+                    <h3>{plugin.name}</h3>
+                  </div>
+                  <StatusBadge
+                    tone={pluginStatusTone(plugin.runtime.status)}
+                    animated={plugin.runtime.status === "安装中" || plugin.runtime.status === "卸载中"}
+                  >
+                    {plugin.runtime.status}
+                  </StatusBadge>
+                </div>
+                <p>{plugin.summary}</p>
+                <div className="plugin-card-strip">
+                  <span>{plugin.capability}</span>
+                  <span>{plugin.version}</span>
+                  <span>{plugin.deployment}</span>
+                </div>
+                <div className="ft-tag-strip plugin-tag-strip">
+                  {plugin.tags.map((tag) => (
+                    <span key={tag}>{tag}</span>
+                  ))}
+                </div>
+                <div className="plugin-process-line">
+                  <span>过程</span>
+                  <strong>{plugin.runtime.phase}</strong>
+                </div>
+                <div className="plugin-progress-track">
+                  <span style={{ width: `${plugin.runtime.progress}%` }} />
+                </div>
+                <div className="plugin-action-row">
+                  <span>{plugin.runtime.progress}%</span>
+                  <Button
+                    variant="secondary"
+                    icon={plugin.runtime.status === "可选安装" ? Plus : Minus}
+                    onClick={() => onRunPluginAction(plugin)}
+                    disabled={plugin.runtime.status === "安装中" || plugin.runtime.status === "卸载中"}
+                  >
+                    {plugin.runtime.status === "可选安装"
+                      ? "安装"
+                      : plugin.runtime.status === "安装中"
+                        ? "安装中"
+                        : plugin.runtime.status === "卸载中"
+                          ? "卸载中"
+                          : "卸载"}
+                  </Button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
+    </ModuleScaffold>
+  );
+}
+
+function ClusterResourcePoolDetailRoute({
+  clusters,
+  clusterHostGroups,
+  setClusterHostGroups,
+  onOpenConfig,
+  onAdjustClusterNodeCount,
+  addAudit,
+}: {
+  clusters: Cluster[];
+  clusterHostGroups: Record<string, ClusterHostGroup[]>;
+  setClusterHostGroups: React.Dispatch<React.SetStateAction<Record<string, ClusterHostGroup[]>>>;
+  onOpenConfig: (clusterId: string) => void;
+  onAdjustClusterNodeCount: (clusterId: string, poolId: string, delta: number) => void;
+  addAudit: (event: Omit<AuditEvent, "id" | "time">) => void;
+}) {
+  const navigate = useNavigate();
+  const { clusterId } = useParams();
+  const cluster = clusters.find((item) => item.id === clusterId);
+  const groups = cluster ? clusterHostGroups[cluster.id] ?? [] : [];
+  const [expandedGroupIds, setExpandedGroupIds] = useState<string[]>([]);
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setExpandedGroupIds(groups.map((group) => group.id));
+    setSelectedHostId(groups[0]?.hosts[0]?.id ?? null);
+  }, [cluster?.id]);
+
+  if (!cluster) {
+    return (
+      <ModuleScaffold scenarioKey="cluster">
+        <section className="surface-panel">
+          <SectionHeader eyebrow="RESOURCE POOL DETAIL" title="未找到对应集群" description="请返回集群列表，重新选择需要查看的集群。" />
+          <div className="action-row">
+            <Button variant="secondary" onClick={() => navigate("/cluster")}>返回集群列表</Button>
+          </div>
+        </section>
+      </ModuleScaffold>
+    );
+  }
+
+  const hostEntries = groups.flatMap((group) => group.hosts.map((host) => ({ ...host, groupId: group.id, groupName: group.name, groupRole: group.role })));
+  const selectedHost = hostEntries.find((host) => host.id === selectedHostId) ?? hostEntries[0] ?? null;
+  const runningHosts = hostEntries.filter((host) => host.status === "运行中").length;
+  const maintenanceHosts = hostEntries.filter((host) => host.status === "维护中").length;
+  const isolatedHosts = hostEntries.filter((host) => host.status === "已隔离").length;
+
+  const toggleGroup = (groupId: string) => {
+    setExpandedGroupIds((current) =>
+      current.includes(groupId) ? current.filter((item) => item !== groupId) : [...current, groupId],
+    );
+  };
+
+  const updateGroupHosts = (groupId: string, updater: (group: ClusterHostGroup) => ClusterHostGroup) => {
+    setClusterHostGroups((current) => ({
+      ...current,
+      [cluster.id]: current[cluster.id].map((group) => (group.id === groupId ? updater(group) : group)),
+    }));
+  };
+
+  const addHostToGroup = (groupId: string) => {
+    const group = groups.find((item) => item.id === groupId);
+    if (!group) {
+      return;
+    }
+
+    const nextSerial = group.hosts.length + 1;
+    const nextHost = createHostForGroup(cluster, group, nextSerial);
+    updateGroupHosts(groupId, (current) => ({ ...current, hosts: [...current.hosts, nextHost] }));
+    onAdjustClusterNodeCount(cluster.id, groupId, 1);
+    setSelectedHostId(nextHost.id);
+    addAudit({
+      actor: "资源池控制台",
+      action: "添加主机到资源池",
+      target: `${cluster.name} / ${group.name} / ${nextHost.name}`,
+      result: "成功",
+    });
+  };
+
+  const removeHostFromGroup = (groupId: string) => {
+    const group = groups.find((item) => item.id === groupId);
+    if (!group || group.hosts.length === 0) {
+      return;
+    }
+
+    const removedHost = group.hosts[group.hosts.length - 1];
+    updateGroupHosts(groupId, (current) => ({ ...current, hosts: current.hosts.slice(0, -1) }));
+    onAdjustClusterNodeCount(cluster.id, groupId, -1);
+    if (selectedHostId === removedHost.id) {
+      setSelectedHostId(group.hosts[group.hosts.length - 2]?.id ?? null);
+    }
+    addAudit({
+      actor: "资源池控制台",
+      action: "移除资源池主机",
+      target: `${cluster.name} / ${group.name} / ${removedHost.name}`,
+      result: "成功",
+    });
+  };
+
+  const patchHost = (groupId: string, hostId: string, patch: Partial<ClusterHost>) => {
+    updateGroupHosts(groupId, (current) => ({
+      ...current,
+      hosts: current.hosts.map((host) => (host.id === hostId ? { ...host, ...patch, lastHeartbeat: `2026-04-25 ${nowTime()}` } : host)),
+    }));
+  };
+
+  const runHostAction = (action: "维护模式" | "恢复运行" | "隔离下线" | "重启主机") => {
+    if (!selectedHost) {
+      return;
+    }
+
+    if (action === "重启主机") {
+      patchHost(selectedHost.groupId, selectedHost.id, { status: "维护中", power: "待重启" });
+      addAudit({
+        actor: "资源池控制台",
+        action,
+        target: `${cluster.name} / ${selectedHost.groupName} / ${selectedHost.name}`,
+        result: "处理中",
+      });
+
+      window.setTimeout(() => {
+        patchHost(selectedHost.groupId, selectedHost.id, { status: "运行中", power: "在线" });
+        addAudit({
+          actor: "资源池控制台",
+          action: "主机重启完成",
+          target: `${cluster.name} / ${selectedHost.groupName} / ${selectedHost.name}`,
+          result: "成功",
+        });
+      }, 820);
+      return;
+    }
+
+    const nextPatch =
+      action === "维护模式"
+        ? { status: "维护中" as ClusterHostStatus, power: "在线" as ClusterHostPower }
+        : action === "恢复运行"
+          ? { status: "运行中" as ClusterHostStatus, power: "在线" as ClusterHostPower }
+          : { status: "已隔离" as ClusterHostStatus, power: "已关机" as ClusterHostPower };
+
+    patchHost(selectedHost.groupId, selectedHost.id, nextPatch);
+    addAudit({
+      actor: "资源池控制台",
+      action,
+      target: `${cluster.name} / ${selectedHost.groupName} / ${selectedHost.name}`,
+      result: "成功",
+    });
+  };
+
+  return (
+    <ModuleScaffold scenarioKey="cluster">
+      <section className="surface-panel">
+        <div className="cluster-detail-head cluster-detail-actions">
+          <div>
+            <button className="inline-action" onClick={() => navigate("/cluster")}>返回集群列表</button>
+            <SectionHeader
+              eyebrow="RESOURCE POOL DETAIL"
+              title={`${cluster.name} 资源池图形管理`}
+              description="按资源池分组展示主机小卡片。当前详情页共展示 3 组节点，主机卡片包含主机名、状态、显卡类型和数量，并支持组级扩缩与主机控制。"
+            />
+          </div>
+          <div className="cluster-detail-toolbar">
+            <Button variant="secondary" icon={Settings} onClick={() => onOpenConfig(cluster.id)}>集群配置</Button>
+          </div>
+        </div>
+
+        <div className="metric-grid">
+          <MetricCard icon={ServerCog} label="资源池组数" value={`${groups.length}`} unit="组" tone="cyan" />
+          <MetricCard icon={CheckCircle2} label="运行中主机" value={`${runningHosts}`} unit="台" tone="emerald" />
+          <MetricCard icon={AlertTriangle} label="维护中主机" value={`${maintenanceHosts}`} unit="台" tone="amber" />
+          <MetricCard icon={StopCircle} label="已隔离主机" value={`${isolatedHosts}`} unit="台" tone="rose" />
+        </div>
+      </section>
+
+      <section className="resource-detail-layout">
+        <div className="resource-groups-shell">
+          {groups.map((group) => {
+            const isExpanded = expandedGroupIds.includes(group.id);
+            const groupRunning = group.hosts.filter((host) => host.status === "运行中").length;
+            const groupGpuType = normalizeGpuType(group.accelerator);
+            const groupGpuCount = defaultGpuCount(group.role, groupGpuType);
+
+            return (
+              <article key={group.id} className="surface-panel resource-group-card">
+                <div className="resource-group-head">
+                  <div>
+                    <span className="eyebrow">{group.role} 资源池</span>
+                    <h3>{group.name}</h3>
+                    <p>{group.networkPolicy} · {group.rdmaNic} · {group.hosts.length} 台主机</p>
+                  </div>
+                  <div className="resource-group-actions">
+                    <StatusBadge tone={groupRunning === group.hosts.length ? "emerald" : groupRunning > 0 ? "amber" : "rose"}>
+                      {groupRunning}/{group.hosts.length} 运行中
+                    </StatusBadge>
+                    <Button variant="ghost" onClick={() => toggleGroup(group.id)}>{isExpanded ? "收起主机" : "展开主机"}</Button>
+                    <Button variant="secondary" icon={Plus} onClick={() => addHostToGroup(group.id)}>添加主机</Button>
+                    <Button variant="ghost" icon={Minus} onClick={() => removeHostFromGroup(group.id)} disabled={group.hosts.length === 0}>移除主机</Button>
+                  </div>
+                </div>
+
+                <div className="resource-group-summary">
+                  <KeyValue label="主机规模" value={`${group.hosts.length} 台`} />
+                  <KeyValue label="显卡类型" value={groupGpuType} />
+                  <KeyValue label="单机显卡数" value={`${groupGpuCount} 张`} />
+                  <KeyValue label="主网络策略" value={group.networkPolicy} />
+                </div>
+
+                {isExpanded ? (
+                  <div className="resource-host-grid">
+                    {group.hosts.map((host) => (
+                      <button
+                        key={host.id}
+                        className={`resource-host-card ${selectedHost?.id === host.id ? "selected" : ""}`}
+                        onClick={() => setSelectedHostId(host.id)}
+                      >
+                        <div className="resource-host-card-head">
+                          <strong>{host.name}</strong>
+                          <StatusBadge tone={clusterHostStatusTone(host.status)}>{host.status}</StatusBadge>
+                        </div>
+                        <div className="resource-host-card-meta">
+                          <span>{host.gpuType}</span>
+                          <span>{host.gpuCount} 张</span>
+                        </div>
+                        <div className="resource-host-card-meta muted">
+                          <span>{host.rack}</span>
+                          <span>{host.power}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </article>
+            );
+          })}
+        </div>
+
+        <aside className="surface-panel resource-host-control">
+          <SectionHeader
+            eyebrow="HOST CONTROL"
+            title={selectedHost ? selectedHost.name : "选择主机"}
+            description={selectedHost ? `${selectedHost.groupName} 内主机控制面板` : "从左侧资源池中选择一台主机，查看状态并执行控制动作。"}
+          />
+
+          {selectedHost ? (
+            <>
+              <div className="resource-host-kv-grid">
+                <KeyValue label="所属资源池" value={selectedHost.groupName} />
+                <KeyValue label="池角色" value={selectedHost.groupRole} />
+                <KeyValue label="主机状态" value={selectedHost.status} positive={selectedHost.status === "运行中"} />
+                <KeyValue label="电源状态" value={selectedHost.power} />
+                <KeyValue label="显卡类型" value={selectedHost.gpuType} />
+                <KeyValue label="显卡数量" value={`${selectedHost.gpuCount} 张`} />
+                <KeyValue label="管理 IP" value={selectedHost.ip} />
+                <KeyValue label="机架位置" value={selectedHost.rack} />
+                <KeyValue label="部署分区" value={selectedHost.zone} />
+                <KeyValue label="最后心跳" value={selectedHost.lastHeartbeat} />
+              </div>
+
+              <LogPanel
+                title="主机控制指令预览"
+                lines={[
+                  `host=${selectedHost.name}`,
+                  `status=${selectedHost.status}`,
+                  `gpu=${selectedHost.gpuType} x ${selectedHost.gpuCount}`,
+                  `power=${selectedHost.power}`,
+                  `location=${selectedHost.zone} / ${selectedHost.rack}`,
+                ]}
+              />
+
+              <div className="resource-host-buttons">
+                <Button variant="secondary" icon={RefreshCcw} onClick={() => runHostAction("重启主机")}>重启主机</Button>
+                <Button variant="ghost" icon={Settings} onClick={() => runHostAction("维护模式")}>维护模式</Button>
+                <Button variant="ghost" icon={Play} onClick={() => runHostAction("恢复运行")}>恢复运行</Button>
+                <Button variant="ghost" icon={StopCircle} onClick={() => runHostAction("隔离下线")}>隔离下线</Button>
+              </div>
+            </>
+          ) : (
+            <div className="inline-notice warn">
+              <strong>尚未选中主机</strong>
+              <span>先在左侧任意资源池中点击主机小卡片，再执行组内主机控制。</span>
+            </div>
+          )}
+        </aside>
+      </section>
+    </ModuleScaffold>
+  );
+}
+
+function TenantQuotaPage({ addAudit }: { addAudit: (event: Omit<AuditEvent, "id" | "time">) => void }) {
+  const [profiles, setProfiles] = useState<TenantQuotaProfile[]>(() => initialTenantQuotaProfiles.map((item) => ({ ...item })));
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+  const [draftProfile, setDraftProfile] = useState<TenantQuotaProfile | null>(null);
+
+  const totalCpu = profiles.reduce((sum, item) => sum + item.cpu, 0);
+  const totalMemory = profiles.reduce((sum, item) => sum + item.memory, 0);
+  const totalGpu = profiles.reduce((sum, item) => sum + item.gpu, 0);
+  const totalStorage = profiles.reduce((sum, item) => sum + item.storage, 0);
+  const warningCount = profiles.filter((item) => item.status === "预警").length;
+
+  const openEditor = (profile: TenantQuotaProfile) => {
+    setEditingProfileId(profile.id);
+    setDraftProfile({ ...profile });
+  };
+
+  const closeEditor = () => {
+    setEditingProfileId(null);
+    setDraftProfile(null);
+  };
+
+  const updateDraftField = <K extends keyof TenantQuotaProfile>(key: K, value: TenantQuotaProfile[K]) => {
+    setDraftProfile((current) => (current ? { ...current, [key]: value } : current));
+  };
+
+  const quotaStatusTone = (status: TenantQuotaStatus): Tone => {
+    if (status === "已生效") return "emerald";
+    if (status === "待审批") return "amber";
+    return "rose";
+  };
+
+  const validationMessage =
+    draftProfile &&
+    (draftProfile.cpu < draftProfile.usedCpu ||
+    draftProfile.memory < draftProfile.usedMemory ||
+    draftProfile.gpu < draftProfile.usedGpu ||
+    draftProfile.storage < draftProfile.usedStorage)
+      ? "当前输入的配额低于该租户已使用资源，保存后会进入预警状态。"
+      : "当前配置高于已使用资源，可直接生效为租户新配额。";
+
+  const applyDraft = () => {
+    if (!draftProfile) {
+      return;
+    }
+
+    const nextStatus: TenantQuotaStatus =
+      draftProfile.cpu < draftProfile.usedCpu ||
+      draftProfile.memory < draftProfile.usedMemory ||
+      draftProfile.gpu < draftProfile.usedGpu ||
+      draftProfile.storage < draftProfile.usedStorage
+        ? "预警"
+        : "已生效";
+
+    const nextProfile = {
+      ...draftProfile,
+      status: nextStatus,
+      updatedAt: `2026-04-25 ${nowTime()}`,
+    };
+
+    setProfiles((current) => current.map((item) => (item.id === nextProfile.id ? nextProfile : item)));
+    addAudit({
+      actor: "平台运营员",
+      action: "设置租户级资源配额",
+      target: `${nextProfile.tenantName} / CPU ${nextProfile.cpu} / GPU ${nextProfile.gpu}`,
+      result: "成功",
+    });
+    closeEditor();
+  };
+
+  return (
+    <ModuleScaffold scenarioKey="tenant-quota">
+      <section className="surface-panel">
+        <SectionHeader
+          eyebrow="TENANT QUOTA"
+          title="租户列表与配额分配"
+          description="平台运营人员可在此查看租户资源池额度，并通过右侧“配额分配”按钮设置 CPU、内存、GPU 和硬盘等租户级资源配置。"
+        />
+        <div className="metric-grid">
+          <MetricCard icon={Users} label="纳管租户" value={`${profiles.length}`} unit="个" tone="violet" />
+          <MetricCard icon={Cpu} label="CPU 总配额" value={`${totalCpu}`} unit="核" tone="blue" />
+          <MetricCard icon={Boxes} label="GPU 总配额" value={`${totalGpu}`} unit="卡" tone="emerald" />
+          <MetricCard icon={HardDrive} label="硬盘总配额" value={`${totalStorage}`} unit="TB" tone={warningCount > 0 ? "amber" : "cyan"} />
+        </div>
+      </section>
+
+      <section className="surface-panel">
+        <div className="cluster-plugin-header">
+          <div>
+            <span className="eyebrow">TENANT LIST</span>
+            <h2>租户列表</h2>
+            <p>列表右侧提供“配额分配”按钮，点击后弹出资源配置窗口，支持对租户级 CPU、内存、GPU、硬盘配额进行调整。</p>
+          </div>
+          <div className="cluster-plugin-meta">
+            <MetricMini label="内存总配额" value={`${Math.round(totalMemory / 1024)} TB`} />
+            <MetricMini label="预警租户" value={`${warningCount}`} />
+            <MetricMini label="今日更新" value={`${profiles.filter((item) => item.updatedAt.startsWith("2026-04-25")).length}`} />
+          </div>
+        </div>
+
+        <DataTable
+          columns={["租户", "负责人 / 工作空间", "资源配额", "当前使用", "状态", "操作"]}
+          rows={profiles.map((profile) => [
+            <div key={`${profile.id}-tenant`}>
+              <strong>{profile.tenantName}</strong>
+              <div className="table-note">{profile.industry}</div>
+            </div>,
+            <div key={`${profile.id}-owner`}>
+              <strong>{profile.owner}</strong>
+              <div className="table-note">{profile.workspaceCount} 个工作空间</div>
+            </div>,
+            <div key={`${profile.id}-quota`} className="quota-bars">
+              {[
+                { label: "CPU", value: `${profile.cpu} 核` },
+                { label: "内存", value: `${profile.memory} GB` },
+                { label: "GPU", value: `${profile.gpu} 卡` },
+                { label: "硬盘", value: `${profile.storage} TB` },
+              ].map((item) => (
+                <div key={item.label}>
+                  <div>
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                  </div>
+                </div>
+              ))}
+            </div>,
+            <div key={`${profile.id}-usage`} className="quota-bars">
+              {[
+                { label: "CPU", value: profile.usedCpu, max: profile.cpu },
+                { label: "内存", value: profile.usedMemory, max: profile.memory },
+                { label: "GPU", value: profile.usedGpu, max: profile.gpu },
+                { label: "硬盘", value: profile.usedStorage, max: profile.storage },
+              ].map((item) => (
+                <div key={item.label}>
+                  <div>
+                    <span>{item.label}</span>
+                    <strong>{item.value}/{item.max}</strong>
+                  </div>
+                  <div className="quota-track" style={{ ["--tone-rgb" as string]: item.value > item.max * 0.85 ? "217,119,6" : "37,99,235" }}>
+                    <span style={{ width: `${Math.min(100, Math.round((item.value / item.max) * 100))}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>,
+            <StatusBadge key={`${profile.id}-status`} tone={quotaStatusTone(profile.status)}>{profile.status}</StatusBadge>,
+            <div key={`${profile.id}-action`} className="table-action-stack">
+              <button className="inline-action" onClick={() => openEditor(profile)}>配额分配</button>
+              <span className="table-note">更新于 {profile.updatedAt}</span>
+            </div>,
+          ])}
+        />
+      </section>
+
+      {editingProfileId && draftProfile ? (
+        <div className="modal-backdrop" role="presentation" onClick={closeEditor}>
+          <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="tenant-quota-title" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <span className="eyebrow">QUOTA ASSIGNMENT</span>
+                <h3 id="tenant-quota-title">租户配额分配</h3>
+                <p>{draftProfile.tenantName} · 设置租户级 CPU、内存、GPU 和硬盘资源，并作为后续工作空间授权的上限来源。</p>
+              </div>
+              <button className="icon-button" aria-label="关闭窗口" onClick={closeEditor}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="allocation-summary compact">
+              <KeyValue label="租户" value={draftProfile.tenantName} />
+              <KeyValue label="负责人" value={draftProfile.owner} />
+              <KeyValue label="工作空间" value={`${draftProfile.workspaceCount} 个`} />
+              <KeyValue label="当前状态" value={draftProfile.status} positive={draftProfile.status === "已生效"} />
+            </div>
+
+            <div className="form-grid two">
+              <label className="field">
+                <span>CPU 配额</span>
+                <input type="number" min={0} value={draftProfile.cpu} onChange={(event) => updateDraftField("cpu", Number(event.target.value))} />
+              </label>
+              <label className="field">
+                <span>内存配额（GB）</span>
+                <input type="number" min={0} value={draftProfile.memory} onChange={(event) => updateDraftField("memory", Number(event.target.value))} />
+              </label>
+              <label className="field">
+                <span>GPU 配额</span>
+                <input type="number" min={0} value={draftProfile.gpu} onChange={(event) => updateDraftField("gpu", Number(event.target.value))} />
+              </label>
+              <label className="field">
+                <span>硬盘配额（TB）</span>
+                <input type="number" min={0} value={draftProfile.storage} onChange={(event) => updateDraftField("storage", Number(event.target.value))} />
+              </label>
+              <div className="field readonly-field">
+                <span>当前已用 CPU / GPU</span>
+                <strong>{draftProfile.usedCpu} 核 / {draftProfile.usedGpu} 卡</strong>
+              </div>
+              <div className="field readonly-field">
+                <span>当前已用内存 / 硬盘</span>
+                <strong>{draftProfile.usedMemory} GB / {draftProfile.usedStorage} TB</strong>
+              </div>
+            </div>
+
+            <div className={`inline-notice ${validationMessage.includes("预警") ? "warn" : "ok"}`}>
+              <strong>校验结果</strong>
+              <span>{validationMessage}</span>
+            </div>
+
+            <LogPanel
+              title="配额下发预览"
+              lines={[
+                `tenant=${draftProfile.tenantName}`,
+                `cpu=${draftProfile.cpu}`,
+                `memory_gb=${draftProfile.memory}`,
+                `gpu=${draftProfile.gpu}`,
+                `storage_tb=${draftProfile.storage}`,
+              ]}
+            />
+
+            <div className="modal-actions">
+              <Button variant="ghost" onClick={closeEditor}>取消</Button>
+              <Button variant="secondary" icon={SlidersHorizontal} onClick={applyDraft}>保存配额</Button>
             </div>
           </section>
         </div>
